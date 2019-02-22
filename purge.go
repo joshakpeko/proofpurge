@@ -1,12 +1,10 @@
 package main
 
 import (
-    "encoding/csv"
     "flag"
     "fmt"
     "log"
     "os"
-    "regexp"
 )
 
 
@@ -15,36 +13,34 @@ var d = flag.String("d", "", `credit csv filename`)
 
 func main() {
     flag.Parse()
-    var credits, debits [][]string
+    var credit, debit [][]string
 
     // load csv files
-    credits, err := load(*c)
+    credit, err := load(*c)
     if err != nil {
         log.Fatal(err)
     }
-    debits, err := load(*d)
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // merge all account entries
-    entries, err := merge(credits, debits)
+    debit, err := load(*d)
     if err != nil {
         log.Fatal(err)
     }
 
-    entries.purge()
-
-    if err = mirror(entries, debits, credits); err != nil {
+    // merge all account records
+    records := merge(debit, credit)
+    if err != nil {
         log.Fatal(err)
     }
 
-    // save purged entries to csv files
-    if err = dump(debits, true); err != nil {
+    records.purge()
+
+    debit, credit = mirror(records, debit, credit)
+
+    // save purged records to csv files
+    if err = dump(debit, true); err != nil {
         log.Fatal(err)
     }
     }
-    if err = dump(credits, true); err != nil {
+    if err = dump(credit, true); err != nil {
         log.Fatal(err)
     }
 }
