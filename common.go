@@ -8,83 +8,98 @@ import (
     "bytes"
     "encoding/csv"
     "fmt"
-    "os"
-    "path/filepath"
+    "io"
+    //"os"
+    //"path/filepath"
     "regexp"
     "strings"
+    //"time"
 )
 
 var labelRE = regexp.MustCompile(`\d{8}`)
 const REindex int = 1
 
-var (
-    logBuf bytes.Buffer
-    wd, _       = os.Getwd()
-    outDir      = filepath.Join(wd, "output")
-    logFile     = filepath.Join(outDir, "purge.log")
-    debitFile   = filepath.Join(outDir, "debit_out.csv")
-    creditFile  = filepath.Join(outDir, "credit_out.csv")
-)
-
 // A Record represents an individual debit or credit record in
 // an account journal.
-// Each account is consists of two lists: a credit records,
+// Each account consists of two lists: a credit records,
 // and a debit records.
 // The sequential offset of each record in its corresponding list is
-// reported in the `position` field.
-// `reference` is computed by scanning the `label` with a regular
-// expression. Non-matching scans lead to empty string reference.
+// reported in the `offset` field.
 // `debit` is the direction of the record: true for debit, false for
 // credit.
 type Record struct {
-    position        int
-    reference       string
+    offset          int
     label           []string
     debit           bool
 }
 
-// empty empties the label field of the r.
-func (r *Record) empty() {
+// Empty empties the label field of the r.
+func (r *Record) Empty() {
     r.label = make([]string, 0)
 }
 
-// isEmpty returns true if r's label field is an empty slice, else
+// IsEmpty returns true if r's label field is an empty slice, else
 // false.
-func (r *Record) isEmpty() bool {
+func (r *Record) IsEmpty() bool {
     return len(r.label) == 0
 }
 
-type RecordList []*Record
+// Ref computes and returns the reference of r.
+// This reference represents the subset of r.label that matches the
+// regular expression labelRE.
+// Note that the result may be an empty string, in case no
+// match has been found.
+func (r *Record) Ref() string {
+    if r.IsEmpty() || len(r.label) <= REindex {
+        return ""
+    }
+    return labelRE.FindString(r.label[REindex])
+}
 
-// purge, for each matching records pair (credit and debit), empties
+// Record returs true if r matches s, meaning r and s have the same
+// references.
+// It returns false otherwise.
+func  (r *Record) Match(s *Record) bool {
+    if ref := r.Ref(); ref != "" && ref == s.Ref() {
+        return true
+    }
+    return false
+}
+
+// RecordList keeps a list of *Records.
+// It also has a memory buffer useful for recording purged Records.
+type RecordList struct {
+    buf         bytes.Buffer
+    Records     []*Record
+}
+
+// Purge, for each matching records pair (credit and debit), empties
 // the corresponding records label.
-// It logs purged records into `logBuf`
-func (list RecordList) purge() {
-    var matches RecordList
+// It logs purged records into the memory buffer in RecordList,
+// and returns the number of records pair purged.
+func (list *RecordList) Purge() int {
+    var count int
+    var matches []*Record
     matched := make(map[*Record]bool)
 
-    // matchAllWith adds rec and items in list that matches with rec,
-    // to the matches. Note that matches is emptied first.
+    // matchAllWith adds `rec` plus each item in list that matches
+    // with it to `matches`. Note that matches is emptied at each run.
     matchAllWith := func(rec *Record) {
         matches = nil
-        if !matched[rec] && rec.reference != "" {
+        if !matched[rec] && rec.Ref() != "" {
             matches = append(matches, rec)
             matched[rec] = true
-            for _, r := range list {
+            for _, r := range list.Records {
                 // keep all matches, even those in the same list
-                if r.isEmpty() || matched[r] {
-                    continue
-                }
-                if r != rec && r.reference == rec.reference {
+                if !matched[r] && rec.Match(r) {
                     matches = append(matches, r)
                     matched[r] = true
                 }
             }
         }
     }
-    for _, rec := range list {
-        matchAllWith(rec)
-        if len(matches) != 2 {
+    for _, rec := range list.Records {
+        if matchAllWith(rec); len(matches) != 2 {
             continue
         }
         // only matches from different lists matter
@@ -92,81 +107,78 @@ func (list RecordList) purge() {
             continue
         }
         for _, r := range matches {
-            fmt.Fprintf(&logBuf, "%s\n", strings.Join(r.label, ","))
-            r.empty()
+            fmt.Fprintf(&list.buf, "%s\n", strings.Join(r.label, ","))
+            r.Empty()
         }
-        fmt.Fprintln(&logBuf)
+        fmt.Fprintln(&list.buf)
+        count++
     }
+    return count
 }
 
-// log logs the last purge() method call details to `logFile`.
-// Those details only consist of pairs of records purged.
-func (list RecordList) log() error {
-    f, err := os.Create(logFile)
-    if err != nil {
-        return fmt.Errorf("logging: %v", err)
-    }
-    defer f.Close()
-    fmt.Fprintln(f, logBuf.String())
-    logBuf.Reset()
-    return nil
+// Log writes the details of the last `purge` method calls of list to
+// w. These details only consist of pairs of records purged since
+// the last time this method was called.
+// Note that each time log is called, the memory buffer
+// in the `buf` field of list is emptied.
+// Log returns any write error encountered.
+func (list *RecordList) Log(w io.Writer) error {
+    _, err := fmt.Fprintln(w, list.buf.String())
+    list.buf.Reset()
+    return err
 }
 
-// load reads filename as csv file and return its contents
-// in a slice of slices of string.
+// Load reads the content of r as a csv formatted data.
+// It returns the result as a slice of slices of string.
 // If an error occurs during the process, the error-value in non-nil.
-func load(filename string) ([][]string, error) {
-    f, err := os.Open(filename)
-    if err != nil {
-        return nil, fmt.Errorf("loading %s: %v", filename, err)
-    }
-    defer f.Close()
-    data := csv.NewReader(f)
+func Load(r io.Reader) ([][]string, error) {
+    data := csv.NewReader(r)
     return data.ReadAll()
 }
 
-// merge takes debit and credit entries and return a RecordList
-// containing all entries of the two lists.
-func merge(debit, credit [][]string) RecordList {
+// Merge takes debit and credit entries and return a RecordList
+// containing all entries of the two lists converted into 
+// *Record entities.
+func Merge(debit, credit [][]string) *RecordList {
     var list RecordList
     for i, entry := range debit {
         d := &Record{
-            position: i,
-            reference: labelRE.FindString(entry[REindex]),
+            offset: i,
             label: entry,
             debit: true,
         }
-        list = append(list, d)
+        list.Records = append(list.Records, d)
     }
     for i, entry := range credit {
         c := &Record{
-            position: i,
-            reference: labelRE.FindString(entry[REindex]),
+            offset: i,
             label: entry,
         }
-        list = append(list, c)
+        list.Records = append(list.Records, c)
     }
-    return list
+    return &list
 }
 
-// for each individual entry in debit and credit, mirror looks
+// for each individual entry in debit and credit, Mirror looks
 // for the corresponding record in records, and then reflects changes
 // made to latter in the former.
 // It then returns the mirrored debit and credit entries.
-func mirror(records RecordList, debit, credit [][]string) ([][]string, [][]string) {
+// Note that original debit and credit provided by the caller are not
+// modified.
+func Mirror(records *RecordList, debit, credit [][]string) ([][]string, [][]string) {
 
     // list holds copies of items in records
-    list := make(RecordList, 0, len(records))
-    list = append(list, records...)
+    list := make([]*Record, 0, len(records.Records))
+    list = append(list, records.Records...)
 
     for _, rec := range list {
-        if !rec.isEmpty() {
+        if !rec.IsEmpty() {
             continue
         }
         if rec.debit {
-            debit[rec.position] = make([]string, 0)
+            debit[rec.offset] = make([]string, 0)
         } else {
-            credit[rec.position] = make([]string, 0)
+            credit[rec.offset] = make([]string, 0)
         }
     }
     // remove empty entries
@@ -189,28 +201,10 @@ func mirror(records RecordList, debit, credit [][]string) ([][]string, [][]strin
     return cleanDebit, cleanCredit
 }
 
-// dumps writes data to disk as csv file.
-// data is considered an account debit entries if debit is true.
-// Else, data is considered an account credit entries.
-func dump(entries [][]string, debit bool) error {
-    var filename string
-    if debit {
-        filename = debitFile
-    } else {
-        filename = creditFile
-    }
-    if err := os.MkdirAll(outDir, 0755); err != nil {
-        return fmt.Errorf("dump: %v", err)
-    }
-    f, err := os.Create(filename)
-    if err != nil {
-        return fmt.Errorf("dump: %v", err)
-    }
-    defer f.Close()
-
-    data := csv.NewWriter(f)
-    if err := data.WriteAll(entries); err != nil {
-        return fmt.Errorf("dump: saving %s: %v", filename, err)
-    }
-    return nil
+// Dumps writes data as a csv file to the writer w.
+// data is considered an account's debit entries if debit is true.
+// Else, data is considered an account's credit entries.
+func Dump(w io.Writer, entries [][]string) error {
+    data := csv.NewWriter(w)
+    return data.WriteAll(entries)
 }
