@@ -6,103 +6,135 @@ import (
     "log"
     "os"
     "path/filepath"
+    "time"
 )
 
 var (
     wd, _       = os.Getwd()
-    outDir      = filepath.Join(wd, "output")
+    outDir      = filepath.Join(wd, "purge")
     logFile     = filepath.Join(outDir, "purge.log")
-    debitFile   = filepath.Join(outDir, "debit_out.csv")
-    creditFile  = filepath.Join(outDir, "credit_out.csv")
+    debitOfn    = filepath.Join(outDir, "debit_out.csv")
+    creditOfn   = filepath.Join(outDir, "credit_out.csv")
 )
 
-var crd = flag.String("c", "", `debit csv filename`)
-var dbt = flag.String("d", "", `credit csv filename`)
+var (
+    cfn         = flag.String("cf", "", `credit csv filename`)
+    dfn         = flag.String("df", "", `debit csv filename`)
+)
+
+const templ = `
+`
 
 func main() {
+    start := time.Now()
     flag.Parse()
-    if len(*crd) == 0 || len(*dbt) == 0 {
+
+    if len(*cfn) == 0 || len(*dfn) == 0 {
         os.Exit(1)
     }
+
     log.SetPrefix("proofpurge: ")
+    fmt.Println("processing ...\n")
 
-    var npurged int
-
-    // load csv files
-    crdfile, err := os.Open(*crd)
-    if err != nil {
-        log.Fatal(fmt.Sprintf("loading file: %v", err))
-    }
-    defer crdfile.Close()
-
-    dbtfile, err := os.Open(*dbt)
-    if err != nil {
-        log.Fatal(fmt.Sprintf("loading file: %v", err))
-    }
-    defer crdfile.Close()
-
-    var credit, debit [][]string
-
-    credit, err = Load(crdfile)
+    // loads
+    debit, err := loadDebit()
     if err != nil {
         log.Fatal(err)
     }
-    debit, err = Load(dbtfile)
+    credit, err := loadCredit()
     if err != nil {
         log.Fatal(err)
     }
 
-    // merge all account records
-    records := Merge(debit, credit)
-    if err != nil {
-        log.Fatal(err)
-    }
+    var rmap RecordListMap
+    addto(&rmap, true, debit...)
+    addto(&rmap, false, credit...)
 
-    npurged += records.Purge()
+    npurged := rmap.Purge()
 
-    debit, credit = Mirror(records, debit, credit)
-
-    // save purged records to csv files
     if err = os.MkdirAll(outDir, 0755); err != nil {
         log.Fatal(fmt.Sprintf("creating destination folder: %v", err))
     }
-    df, err := os.Create(debitFile)
+
+    // logs
+    if err := logPurged(&rmap); err != nil {
+        log.Fatal(err)
+    }
+
+    debit, credit = rmap.Pack()
+
+    // saves
+    if err := saveDebit(debit); err != nil {
+        log.Fatal(err)
+    }
+    if err := saveCredit(credit); err != nil {
+        log.Fatal(err)
+    }
+
+    elapsed := time.Since(start)
+
+    // prints
+    //fmt.Println("Done!")
+    fmt.Printf(
+        "%d records successfully purged in %v.\n", npurged, elapsed,
+    )
+    fmt.Printf("results saved to %s/ :\n", filepath.Base(outDir))
+    fmt.Printf(
+        "files written on %s and %s\n",
+        filepath.Base(debitOfn), filepath.Base(creditOfn),
+    )
+    fmt.Printf(
+        "transcript written on %s.\n", filepath.Base(logFile),
+    )
+}
+
+func loadDebit() ([][]string, error) {
+    f, err := os.Open(*dfn)
     if err != nil {
-        log.Fatal(fmt.Sprintf("writing %s: %v", debitFile, err))
+        return nil, fmt.Errorf("loading: %v", err)
     }
-    defer df.Close()
+    defer f.Close()
+    return Load(f)
+}
 
-    cf, err := os.Create(creditFile)
+func loadCredit() ([][]string, error) {
+    f, err := os.Open(*cfn)
     if err != nil {
-        log.Fatal(fmt.Sprintf("writing %s: %v", creditFile, err))
+        return nil, fmt.Errorf("loading: %v", err)
     }
-    defer cf.Close()
+    defer f.Close()
+    return Load(f)
+}
 
-    if err = Dump(df, debit); err != nil {
-        log.Fatal(fmt.Sprintf("writing %s: %v", debitFile, err))
+func addto(m *RecordListMap, debit bool, items ...[]string) {
+    for i, item := range items {
+        m.Add(NewRecord(item, i, debit))
     }
-    if err = Dump(cf, credit); err != nil {
-        log.Fatal(fmt.Sprintf("writing %s: %v", creditFile, err))
-    }
+}
 
-    // create and fill log file
-    lf, err := os.Create(logFile)
+func logPurged(m *RecordListMap) error {
+    f, err := os.Create(logFile)
     if err != nil {
-        log.Fatal(fmt.Sprintf("writing %s: %v", logFile, err))
+        return fmt.Errorf("logging: %v", err)
     }
-    defer lf.Close()
-    if err = records.Log(lf); err != nil {
-        log.Fatal(fmt.Sprintf("writing %s: %v", logFile, err))
+    defer f.Close()
+    return m.Log(f)
+}
+
+func saveDebit(data [][]string) error {
+    f, err := os.Create(debitOfn)
+    if err != nil {
+        return fmt.Errorf("saving: %v", err)
     }
+    defer f.Close()
+    return Dump(f, data)
+}
 
-    /*...ouput results to user...*/
-
-    fmt.Println("Done!")
-    fmt.Printf("%d records pair(s) successfully purged.\n", npurged)
-    fmt.Printf("Results saved to %s/ :\n", filepath.Base(outDir))
-
-    fmt.Printf("files written on %s and %s\n",
-    filepath.Base(debitFile), filepath.Base(creditFile))
-
-    fmt.Printf("transcript written on %s.\n", filepath.Base(logFile))
+func saveCredit(data [][]string) error {
+    f, err := os.Create(creditOfn)
+    if err != nil {
+        return fmt.Errorf("saving: %v", err)
+    }
+    defer f.Close()
+    return Dump(f, data)
 }
